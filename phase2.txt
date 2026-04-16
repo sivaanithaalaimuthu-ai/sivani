@@ -1,0 +1,441 @@
+src/main.tsx — Entry Point
+import { createRoot } from "react-dom/client";
+import App from "./App";
+import "./index.css";
+createRoot(document.getElementById("root")!).render(<App />);
+
+src/App.tsx — Router & Providers
+import { Switch, Route, Router as WouterRouter } from "wouter";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { Toaster } from "@/components/ui/toaster";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import NotFound from "@/pages/not-found";
+import Dashboard from "@/pages/home";
+const queryClient = new QueryClient();
+function Router() {
+  return (
+    <Switch>
+      <Route path="/" component={Dashboard} />
+      <Route component={NotFound} />
+    </Switch>
+  );
+}
+function App() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <TooltipProvider>
+        <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
+          <Router />
+        </WouterRouter>
+        <Toaster />
+      </TooltipProvider>
+    </QueryClientProvider>
+  );
+}
+export default App;
+
+src/pages/home.tsx — Main Dashboard (the entire UI)
+import { useState, useEffect, useRef } from "react";
+import {
+  useSimulateFlood,
+  useUpdateFlood,
+  useHealthCheck,
+} from "@workspace/api-client-react";
+import type { SimulationMetadata } from "@workspace/api-client-react/src/generated/api.schemas";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Label } from "@/components/ui/label";
+import { Slider } from "@/components/ui/slider";
+import { Switch } from "@/components/ui/switch";
+import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
+import { Badge } from "@/components/ui/badge";
+import { Separator } from "@/components/ui/separator";
+import {
+  AlertCircle, Activity, Play, Settings2,
+  Droplet, CloudRain, Map as MapIcon, RefreshCw
+} from "lucide-react";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { useToast } from "@/hooks/use-toast";
+// Maps 0–5 meters of depth to a color
+function getDepthColor(depth: number): string {
+  if (depth <= 0) return "transparent";
+  if (depth >= 5) return "hsl(0, 84%, 60%)";
+  const scale = depth / 5;
+  if (scale < 0.2) return "hsl(199, 89%, 60%)"; // light cyan
+  if (scale < 0.4) return "hsl(210, 100%, 50%)"; // blue
+  if (scale < 0.6) return "hsl(43, 74%, 66%)";   // yellow
+  if (scale < 0.8) return "hsl(27, 87%, 67%)";   // orange
+  return "hsl(12, 76%, 61%)";                     // red-orange
+}
+export default function Dashboard() {
+  const { toast } = useToast();
+  // Sensor input state
+  const [rainfall, setRainfall] = useState([50]);      // mm/hr
+  const [riverLevel, setRiverLevel] = useState([2]);   // meters
+  const [gridSize, setGridSize] = useState([10]);      // NxN
+  const [smoothing, setSmoothing] = useState(true);
+  // DEM (Digital Elevation Model) toggle
+  const [useDem, setUseDem] = useState(false);
+  const [demJson, setDemJson] = useState("");
+  // Result state
+  const [grid, setGrid] = useState<number[][] | null>(null);
+  const [metadata, setMetadata] = useState<SimulationMetadata | null>(null);
+  const [autoUpdate, setAutoUpdate] = useState(false);
+  const [lastRun, setLastRun] = useState<Date | null>(null);
+  // API hooks
+  const simulateMutation = useSimulateFlood();
+  const updateMutation = useUpdateFlood();
+  const { data: healthData, isError: healthError } = useHealthCheck({
+    query: { queryKey: ["health"], refetchInterval: 30000 }
+  });
+  // Refs so the auto-update interval always reads fresh values
+  const autoUpdateRef = useRef(autoUpdate);
+  const gridRef = useRef(grid);
+  const settingsRef = useRef({
+    rainfall: rainfall[0], riverLevel: riverLevel[0], gridSize: gridSize[0]
+  });
+  useEffect(() => { autoUpdateRef.current = autoUpdate; }, [autoUpdate]);
+  useEffect(() => { gridRef.current = grid; }, [grid]);
+  useEffect(() => {
+    settingsRef.current = {
+      rainfall: rainfall[0], riverLevel: riverLevel[0], gridSize: gridSize[0]
+    };
+  }, [rainfall, riverLevel, gridSize]);
+  // Run a full simulation
+  const handleSimulate = async () => {
+    let dem: number[][] | undefined = undefined;
+    if (useDem && demJson) {
+      try {
+        dem = JSON.parse(demJson);
+        if (!Array.isArray(dem) || !Array.isArray(dem![0]))
+          throw new Error("Invalid DEM format");
+      } catch {
+        toast({
+          title: "Invalid DEM JSON",
+          description: "Must be a valid 2D array of numbers.",
+          variant: "destructive"
+        });
+        return;
+      }
+    }
+    try {
+      const res = await simulateMutation.mutateAsync({
+        data: {
+          sensors: { rainfall: rainfall[0], riverLevel: riverLevel[0] },
+          gridRows: gridSize[0],
+          gridCols: gridSize[0],
+          smoothing,
+          dem
+        }
+      });
+      setGrid(res.floodGrid);
+      setMetadata(res.metadata);
+      setLastRun(new Date());
+    } catch (error: any) {
+      toast({
+        title: "Simulation Failed",
+        description: error?.message || "Unknown error",
+        variant: "destructive"
+      });
+    }
+  };
+  // Live Feed: poll incremental updates every 5s with slight sensor drift
+  useEffect(() => {
+    if (!autoUpdate) return;
+    const interval = setInterval(async () => {
+      if (!gridRef.current) return;
+      const s = settingsRef.current;
+      const driftedRainfall = Math.max(0, Math.min(200, s.rainfall + (Math.random() * 10 - 5)));
+      const driftedRiverLevel = Math.max(0, Math.min(10, s.riverLevel + (Math.random() * 2 - 1)));
+      try {
+        const res = await updateMutation.mutateAsync({
+          data: {
+            sensors: { rainfall: driftedRainfall, riverLevel: driftedRiverLevel },
+            previousGrid: gridRef.current!,
+          }
+        });
+        setGrid(res.floodGrid);
+        setMetadata(res.metadata);
+        setLastRun(new Date());
+        setRainfall([driftedRainfall]);
+        setRiverLevel([driftedRiverLevel]);
+      } catch {
+        setAutoUpdate(false);
+      }
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [autoUpdate, updateMutation]);
+  return (
+    <div className="min-h-screen bg-background text-foreground flex flex-col dark p-4 md:p-8">
+      {/* ── Header ── */}
+      <header className="flex items-center justify-between mb-8 pb-4 border-b border-border">
+        <div className="flex items-center gap-3">
+          <div className="bg-primary/20 p-2 rounded-md">
+            <Activity className="w-6 h-6 text-primary" />
+          </div>
+          <div>
+            <h1 className="text-xl font-bold tracking-tight">Flood Simulation Command</h1>
+            <p className="text-sm text-muted-foreground">Real-time Response Dashboard</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-4">
+          {healthError ? (
+            <Badge variant="destructive" className="flex items-center gap-1">
+              <AlertCircle className="w-3 h-3" /> System Offline
+            </Badge>
+          ) : (
+            <Badge variant="outline" className="bg-green-500/10 text-green-500 border-green-500/20 flex items-center gap-1">
+              <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+              {healthData?.status || "API Online"}
+            </Badge>
+          )}
+        </div>
+      </header>
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 flex-1">
+        {/* ── Left: Sensor Controls ── */}
+        <div className="lg:col-span-3 space-y-6">
+          <Card className="border-border/50 bg-card/50 backdrop-blur">
+            <CardHeader className="pb-4">
+              <CardTitle className="text-sm font-medium flex items-center gap-2 uppercase tracking-wider text-muted-foreground">
+                <Settings2 className="w-4 h-4" /> Sensor Inputs
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              {/* Rainfall slider */}
+              <div className="space-y-3">
+                <div className="flex justify-between items-center">
+                  <Label className="flex items-center gap-2">
+                    <CloudRain className="w-4 h-4 text-blue-400" /> Rainfall
+                  </Label>
+                  <span className="font-mono text-sm">{rainfall[0].toFixed(1)} mm/hr</span>
+                </div>
+                <Slider value={rainfall} onValueChange={setRainfall} max={200} step={1}
+                  data-testid="input-rainfall" />
+              </div>
+              {/* River Level slider */}
+              <div className="space-y-3">
+                <div className="flex justify-between items-center">
+                  <Label className="flex items-center gap-2">
+                    <Droplet className="w-4 h-4 text-cyan-400" /> River Level
+                  </Label>
+                  <span className="font-mono text-sm">{riverLevel[0].toFixed(1)} m</span>
+                </div>
+                <Slider value={riverLevel} onValueChange={setRiverLevel} max={10} step={0.1}
+                  data-testid="input-river-level" />
+              </div>
+              <Separator className="bg-border/50" />
+              {/* Grid size */}
+              <div className="space-y-3">
+                <div className="flex justify-between items-center">
+                  <Label className="flex items-center gap-2">
+                    <MapIcon className="w-4 h-4 text-emerald-400" /> Grid Size
+                  </Label>
+                  <span className="font-mono text-sm">{gridSize[0]}x{gridSize[0]}</span>
+                </div>
+                <Slider value={gridSize} onValueChange={setGridSize} min={5} max={20} step={1}
+                  data-testid="input-grid-size" />
+              </div>
+              {/* Smoothing */}
+              <div className="flex items-center justify-between">
+                <Label htmlFor="smoothing" className="cursor-pointer">Gaussian Smoothing</Label>
+                <Switch id="smoothing" checked={smoothing} onCheckedChange={setSmoothing}
+                  data-testid="input-smoothing" />
+              </div>
+              {/* Custom DEM */}
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <Label htmlFor="use-dem" className="cursor-pointer">Custom DEM (Elevation)</Label>
+                  <Switch id="use-dem" checked={useDem} onCheckedChange={setUseDem}
+                    data-testid="input-use-dem" />
+                </div>
+                {useDem && (
+                  <Textarea
+                    placeholder='[[1,1,2], [1,0,1], [2,1,1]]'
+                    className="font-mono text-xs h-24 bg-background/50"
+                    value={demJson}
+                    onChange={(e) => setDemJson(e.target.value)}
+                    data-testid="input-dem-json"
+                  />
+                )}
+              </div>
+              <Button className="w-full font-bold" size="lg" onClick={handleSimulate}
+                disabled={simulateMutation.isPending} data-testid="button-simulate">
+                {simulateMutation.isPending
+                  ? "Processing..."
+                  : <><Play className="w-4 h-4 mr-2" /> Run Simulation</>}
+              </Button>
+            </CardContent>
+          </Card>
+        </div>
+        {/* ── Center: Heatmap ── */}
+        <div className="lg:col-span-6 flex flex-col gap-4">
+          <Card className="border-border/50 bg-card/50 backdrop-blur flex-1 min-h-[500px] flex flex-col relative overflow-hidden">
+            <CardHeader className="pb-0 flex flex-row items-center justify-between z-10">
+              <CardTitle className="text-sm font-medium uppercase tracking-wider text-muted-foreground">
+                Depth Heatmap
+              </CardTitle>
+              <div className="flex items-center gap-3 bg-background/80 px-3 py-1.5 rounded-full border border-border/50">
+                <Label htmlFor="auto-update" className="text-xs font-medium cursor-pointer">Live Feed</Label>
+                <Switch id="auto-update" checked={autoUpdate} onCheckedChange={setAutoUpdate}
+                  data-testid="input-auto-update" className="data-[state=checked]:bg-red-500" />
+                {autoUpdate && (
+                  <Badge variant="destructive" className="animate-pulse h-5 text-[10px] px-1.5">LIVE</Badge>
+                )}
+              </div>
+            </CardHeader>
+            <CardContent className="flex-1 flex items-center justify-center p-6 relative z-0">
+              {simulateMutation.isPending && !grid ? (
+                <div className="flex flex-col items-center text-muted-foreground gap-4">
+                  <RefreshCw className="w-8 h-8 animate-spin text-primary" />
+                  <p className="font-mono text-sm">Initializing Terrain Engine...</p>
+                </div>
+              ) : grid ? (
+                <div
+                  className="grid gap-[2px] w-full max-w-[500px] aspect-square bg-border/20 p-1 rounded-sm"
+                  style={{
+                    gridTemplateColumns: `repeat(${grid[0].length}, minmax(0, 1fr))`,
+                    gridTemplateRows: `repeat(${grid.length}, minmax(0, 1fr))`
+                  }}
+                  data-testid="display-heatmap"
+                >
+                  {grid.map((row, rIdx) =>
+                    row.map((val, cIdx) => (
+                      <div
+                        key={`${rIdx}-${cIdx}`}
+                        className="w-full h-full rounded-sm transition-colors duration-500 ease-out group relative"
+                        style={{ backgroundColor: getDepthColor(val) }}
+                        data-testid={`cell-${rIdx}-${cIdx}`}
+                      >
+                        {/* Hover tooltip showing exact depth */}
+                        <div className="absolute inset-0 bg-black/80 text-white opacity-0 group-hover:opacity-100 flex items-center justify-center text-[10px] font-mono rounded-sm transition-opacity pointer-events-none z-20">
+                          {val.toFixed(2)}m
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              ) : (
+                <div className="text-center text-muted-foreground border-2 border-dashed border-border/50 rounded-xl p-12 w-full max-w-[400px]">
+                  <MapIcon className="w-12 h-12 mx-auto mb-4 opacity-50" />
+                  <p>Configure sensors and run simulation to visualize terrain.</p>
+                </div>
+              )}
+            </CardContent>
+            {/* Color scale legend */}
+            <div className="absolute bottom-6 left-6 right-6 flex items-center justify-between z-10 bg-background/80 p-3 rounded-lg border border-border/50 backdrop-blur-sm">
+              <span className="text-xs font-mono">0m (Dry)</span>
+              <div className="flex-1 h-3 mx-4 rounded-full bg-gradient-to-r from-transparent via-[hsl(210,100%,50%)] to-[hsl(12,76%,61%)] border border-border/50" />
+              <span className="text-xs font-mono">5m+ (Critical)</span>
+            </div>
+          </Card>
+        </div>
+        {/* ── Right: Telemetry ── */}
+        <div className="lg:col-span-3 space-y-6">
+          <Card className="border-border/50 bg-card/50 backdrop-blur h-full">
+            <CardHeader>
+              <CardTitle className="text-sm font-medium uppercase tracking-wider text-muted-foreground flex items-center justify-between">
+                Telemetry
+                {lastRun && (
+                  <span className="text-[10px] lowercase text-muted-foreground/70 font-mono tracking-normal" data-testid="text-last-run">
+                    Last sync: {lastRun.toLocaleTimeString()}
+                  </span>
+                )}
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              {!metadata ? (
+                <div className="text-sm text-muted-foreground font-mono">Waiting for telemetry data...</div>
+              ) : (
+                <>
+                  {/* Key stats */}
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="bg-background/50 p-3 rounded-lg border border-border/50">
+                      <p className="text-[10px] uppercase text-muted-foreground mb-1">Max Depth</p>
+                      <p className="text-2xl font-mono text-primary font-bold" data-testid="text-max-depth">
+                        {metadata.maxDepth.toFixed(2)}<span className="text-sm text-muted-foreground ml-1">m</span>
+                      </p>
+                    </div>
+                    <div className="bg-background/50 p-3 rounded-lg border border-border/50">
+                      <p className="text-[10px] uppercase text-muted-foreground mb-1">Flooded Cells</p>
+                      <p className="text-2xl font-mono font-bold text-destructive" data-testid="text-flooded-cells">
+                        {metadata.floodedCells}
+                      </p>
+                    </div>
+                  </div>
+                  {/* Contribution bars */}
+                  <div className="space-y-4">
+                    <h4 className="text-xs font-medium uppercase tracking-wider text-muted-foreground border-b border-border/50 pb-2">
+                      Contribution Analysis
+                    </h4>
+                    <div className="space-y-2">
+                      <div className="flex justify-between text-xs font-mono">
+                        <span className="text-blue-400">Rainfall Influence</span>
+                        <span>{(metadata.rainfallWeight * 100).toFixed(0)}%</span>
+                      </div>
+                      <div className="h-2 bg-background rounded-full overflow-hidden border border-border/50">
+                        <div className="h-full bg-blue-500" style={{ width: `${metadata.rainfallWeight * 100}%` }} />
+                      </div>
+                      <p className="text-[10px] text-muted-foreground">Effective: {metadata.rainfallUsed.toFixed(1)} mm/hr</p>
+                    </div>
+                    <div className="space-y-2 mt-4">
+                      <div className="flex justify-between text-xs font-mono">
+                        <span className="text-cyan-400">River Influence</span>
+                        <span>{(metadata.riverLevelWeight * 100).toFixed(0)}%</span>
+                      </div>
+                      <div className="h-2 bg-background rounded-full overflow-hidden border border-border/50">
+                        <div className="h-full bg-cyan-500" style={{ width: `${metadata.riverLevelWeight * 100}%` }} />
+                      </div>
+                      <p className="text-[10px] text-muted-foreground">Effective: {metadata.riverLevelUsed.toFixed(2)} m</p>
+                    </div>
+                  </div>
+                  {/* Diagnostics */}
+                  <div className="space-y-2">
+                    <h4 className="text-xs font-medium uppercase tracking-wider text-muted-foreground border-b border-border/50 pb-2">
+                      System Diagnostics
+                    </h4>
+                    <div className="grid grid-cols-2 gap-2 text-xs font-mono mt-2">
+                      <div className="text-muted-foreground">Dimensions:</div>
+                      <div className="text-right">{metadata.gridCols} x {metadata.gridRows}</div>
+                      <div className="text-muted-foreground">Smoothing:</div>
+                      <div className="text-right">{metadata.smoothingApplied ? "Active" : "Disabled"}</div>
+                      <div className="text-muted-foreground">Cell Size:</div>
+                      <div className="text-right">10m²</div>
+                    </div>
+                  </div>
+                  {/* Warnings */}
+                  {metadata.warnings?.length > 0 && (
+                    <Alert variant="destructive" className="bg-destructive/10 border-destructive/20">
+                      <AlertCircle className="h-4 w-4" />
+                      <AlertTitle className="text-xs uppercase">System Warnings</AlertTitle>
+                      <AlertDescription className="text-[10px] font-mono mt-2 flex flex-col gap-1">
+                        {metadata.warnings.map((w, i) => <span key={i}>• {w}</span>)}
+                      </AlertDescription>
+                    </Alert>
+                  )}
+                </>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+src/index.css — Theme (Dark Command Center)
+Key color decisions (space-separated HSL, no hsl() wrapper):
+
+/* Dark mode — applied via .dark class on the root div */
+.dark {
+  --background:   224 35%  8%;   /* deep navy */
+  --foreground:   210 40% 98%;   /* near white */
+  --card:         222 35% 10%;   /* slightly lighter than bg */
+  --border:       217 32% 17%;   /* subtle slate border */
+  --primary:      199 89% 48%;   /* cyan — water/activation color */
+  --destructive:    0 84% 60%;   /* red — danger/critical */
+  --muted-foreground: 215 20% 65%; /* dim label text */
+  --chart-1: 199 89% 48%;  /* cool water blue */
+  --chart-2:  43 74% 66%;  /* warning yellow */
+  --chart-3:  12 76% 61%;  /* danger red-orange */
+}
+
