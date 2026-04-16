@@ -1,0 +1,128 @@
+export interface RainfallSensor {
+  id: string;
+  name: string;
+  location: string;
+  rainfallMmPerHour: number;
+  status: "normal" | "warning" | "critical";
+  lat: number;
+  lng: number;
+}
+export interface RiverSensor {
+  id: string;
+  name: string;
+  location: string;
+  waterLevelM: number;
+  flowRateCubicMps: number;
+  bankFullLevel: number;
+  status: "normal" | "warning" | "critical";
+  lat: number;
+  lng: number;
+}
+let sensorTick = 0;
+function oscillate(base: number, amplitude: number, phase: number): number {
+  sensorTick += 0.05;
+  return base + amplitude * Math.sin(sensorTick + phase) + (Math.random() - 0.5) * amplitude * 0.3;
+}
+const SENSOR_CONFIGS = {
+  rainfall: [
+    { id: "r1", name: "North Station",   location: "North District",   lat: 14.65, lng: 121.04, baseRate: 22, phase: 0   },
+    { id: "r2", name: "Central Station", location: "City Center",      lat: 14.63, lng: 121.03, baseRate: 35, phase: 1.2 },
+    { id: "r3", name: "South Station",   location: "South District",   lat: 14.60, lng: 121.05, baseRate: 18, phase: 2.4 },
+    { id: "r4", name: "East Highlands",  location: "Eastern Uplands",  lat: 14.62, lng: 121.08, baseRate: 45, phase: 0.7 },
+    { id: "r5", name: "West Lowlands",   location: "Western Basin",    lat: 14.64, lng: 121.01, baseRate: 28, phase: 1.9 },
+  ],
+  rivers: [
+    { id: "rv1", name: "Marikina River", location: "Marikina", lat: 14.63, lng: 121.06, baseLevel: 4.2, flowBase: 120, bankFull: 5.5, phase: 0.3 },
+    { id: "rv2", name: "Pasig River",    location: "Pasig",    lat: 14.58, lng: 121.07, baseLevel: 3.8, flowBase: 95,  bankFull: 5.0, phase: 1.1 },
+    { id: "rv3", name: "Tullahan River", location: "Caloocan", lat: 14.70, lng: 121.02, baseLevel: 2.5, flowBase: 60,  bankFull: 3.5, phase: 2.0 },
+  ],
+};
+export function getSensorData() {
+  const rainfallSensors: RainfallSensor[] = SENSOR_CONFIGS.rainfall.map((cfg) => {
+    const rate = Math.max(0, oscillate(cfg.baseRate, cfg.baseRate * 0.4, cfg.phase));
+    let status: "normal" | "warning" | "critical" = "normal";
+    if (rate > 50) status = "critical";
+    else if (rate > 30) status = "warning";
+    return { ...cfg, rainfallMmPerHour: Math.round(rate * 10) / 10, status };
+  });
+  const riverSensors: RiverSensor[] = SENSOR_CONFIGS.rivers.map((cfg) => {
+    const level = Math.max(0, oscillate(cfg.baseLevel, cfg.baseLevel * 0.25, cfg.phase));
+    const flow  = Math.max(0, oscillate(cfg.flowBase,  cfg.flowBase  * 0.3,  cfg.phase + 0.5));
+    let status: "normal" | "warning" | "critical" = "normal";
+    if (level >= cfg.bankFull * 1.1)  status = "critical";
+    else if (level >= cfg.bankFull * 0.85) status = "warning";
+    return {
+      ...cfg,
+      waterLevelM: Math.round(level * 100) / 100,
+      flowRateCubicMps: Math.round(flow * 10) / 10,
+      bankFullLevel: cfg.bankFull,
+      status,
+    };
+  });
+  return {
+    timestamp: new Date().toISOString(),
+    rainfallSensors,
+    riverSensors,
+    totalRainfallAvgMmPerHour: Math.round(
+      (rainfallSensors.reduce((s, r) => s + r.rainfallMmPerHour, 0) / rainfallSensors.length) * 10
+    ) / 10,
+    totalRiverSensorsAboveBankFull: riverSensors.filter(r => r.waterLevelM >= r.bankFullLevel).length,
+  };
+}
+
+lib/alertGenerator.ts
+import { getCurrentGrid } from "./floodSimulation.js";
+import { getSensorData } from "./sensorSimulation.js";
+export interface Alert {
+  id: string;
+  level: "critical" | "high" | "medium" | "low";
+  title: string;
+  message: string;
+  location: string;
+  depthM: number;
+  timestamp: string;
+  affectedArea: string;
+}
+const ZONE_NAMES: Record<string, string> = {
+  "0-5":   "Northern Residential Zone",
+  "5-10":  "Commercial District",
+  "10-15": "River Valley",
+  "15-20": "Southern Basin",
+};
+function getZoneName(row: number): string {
+  for (const [range, name] of Object.entries(ZONE_NAMES)) {
+    const [min, max] = range.split("-").map(Number);
+    if (row >= min && row < max) return name;
+  }
+  return "Unknown Zone";
+}
+export function generateAlerts() {
+  const grid    = getCurrentGrid();
+  const sensors = getSensorData();
+  const alerts: Alert[] = [];
+  const now = new Date().toISOString();
+  const zoneDepths: Record<string, { maxDepth: number; cellCount: number; floodedCount: number }> = {};
+  if (grid) {
+    for (const row of grid) {
+      for (const cell of row) {
+        const zone = getZoneName(cell.row);
+        if (!zoneDepths[zone]) zoneDepths[zone] = { maxDepth: 0, cellCount: 0, floodedCount: 0 };
+        zoneDepths[zone].cellCount++;
+        if (cell.isFlooded) {
+          zoneDepths[zone].floodedCount++;
+          zoneDepths[zone].maxDepth = Math.max(zoneDepths[zone].maxDepth, cell.depth);
+        }
+      }
+    }
+  }
+  for (const [zone, data] of Object.entries(zoneDepths)) {
+    if (data.maxDepth < 0.1) continue;
+    let level: Alert["level"];
+    let title: string;
+    let message: string;
+    if      (data.maxDepth >= 3.0) { level = "critical"; title = "Critical Flood Warning";  message = `Dangerous flood levels. Immediate evacuation required. Max depth: ${data.maxDepth.toFixed(2)}m.`; }
+    else if (data.maxDepth >= 1.5) { level = "high";     title = "High Flood Alert";        message = `Significant flooding. Move to higher ground. Max depth: ${data.maxDepth.toFixed(2)}m.`; }
+    else if (data.maxDepth >= 0.5) { level = "medium";   title = "Moderate Flood Warning";  message = `Moderate flooding detected. Exercise caution. Max depth: ${data.maxDepth.toFixed(2)}m.`; }
+    else                           { level = "low";      title = "Minor Flood Advisory";    message = `Minor flooding possible. Stay alert. Max depth: ${data.maxDepth.toFixed(2)}m.`; }
+    const floodPct = Math.round((data.floodedCount / data.cellCount) * 100);
+    alerts.push({ id: `alert-${zone.replace(/\s+/g, "-").toLowerCase()}-${Date.now()}`, level, title
