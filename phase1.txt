@@ -1,0 +1,27 @@
+BACKEND CODE
+routes/sensors.ts
+// GET /sensors/rain-gauges       → all rain gauges
+// GET /sensors/rain-gauges/:id/readings  → time-series (last N hours)
+// GET /sensors/river-gauges      → all river gauges
+// GET /sensors/river-gauges/:id/readings → time-series
+// GET /sensors/sar-imagery       → Sentinel-1 tile metadata
+router.get("/sensors/rain-gauges", async (_req, res) => {
+  const gauges = await db.select().from(rainGaugesTable).orderBy(rainGaugesTable.stationId);
+  res.json(GetRainGaugesResponse.parse(gauges));
+});
+// ...same pattern for river gauges and SAR tiles
+
+routes/alerts.ts
+// GET  /alerts                   → list all (filter by severity query param)
+// POST /alerts/:alertId/acknowledge → mark acknowledged, log to activity table
+router.post("/alerts/:alertId/acknowledge", async (req, res) => {
+  const [updated] = await db
+    .update(alertsTable)
+    .set({ isAcknowledged: true, acknowledgedBy: body.data.acknowledgedBy })
+    .where(eq(alertsTable.alertId, params.data.alertId))
+    .returning();
+  // Also writes to activity_log table
+  await db.insert(activityLogTable).values({ type: "alert_acknowledged", ... });
+  res.json(AcknowledgeAlertResponse.parse(updated));
+});
+
