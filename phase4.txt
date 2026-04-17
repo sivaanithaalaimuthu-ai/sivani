@@ -1,0 +1,489 @@
+import streamlit as st
+import streamlit.components.v1 as components
+import time
+import json
+import io
+from datetime import datetime
+
+# ── Page config (must be first Streamlit call) ────────────────────────────────
+st.set_page_config(
+    page_title="Flood Inundation Mapping Agent",
+    page_icon="🌊",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# ── Custom CSS ────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
+  html, body, [class*="css"] {
+    font-family: 'Rajdhani', sans-serif;
+    background-color: #070e1a;
+    color: #cdd6f4;
+  }
+
+  /* Header */
+  .main-header {
+    background: linear-gradient(135deg, #0d1b2a 0%, #0f3460 100%);
+    border-bottom: 2px solid #1e6091;
+    padding: 14px 24px;
+    margin: -1rem -1rem 1.5rem -1rem;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  .main-header h1 {
+    font-family: 'Rajdhani', sans-serif;
+    font-weight: 700;
+    font-size: 1.8rem;
+    color: #48cae4;
+    letter-spacing: 2px;
+    margin: 0;
+    text-transform: uppercase;
+  }
+  .main-header .badge {
+    background: #e63946;
+    color: white;
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-size: 0.75rem;
+    font-family: 'IBM Plex Mono', monospace;
+    font-weight: 500;
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0.5; }
+  }
+
+  /* Metric cards */
+  .metric-card {
+    background: linear-gradient(135deg, #0d1b2a, #1a2744);
+    border: 1px solid #1e6091;
+    border-radius: 8px;
+    padding: 14px 18px;
+    text-align: center;
+    margin-bottom: 10px;
+  }
+  .metric-card .value {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 1.8rem;
+    font-weight: 600;
+    color: #48cae4;
+  }
+  .metric-card .label {
+    font-size: 0.78rem;
+    color: #8899bb;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+
+  /* Alert feed */
+  .alert-item {
+    background: #0d1b2a;
+    border-left: 4px solid #1e6091;
+    padding: 8px 14px;
+    margin-bottom: 6px;
+    border-radius: 0 6px 6px 0;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.76rem;
+    line-height: 1.5;
+  }
+  .alert-critical { border-left-color: #e63946; background: #1a0d12; }
+  .alert-high     { border-left-color: #e9c46a; background: #1a1600; }
+  .alert-warning  { border-left-color: #ffb703; background: #1a1300; }
+  .alert-normal   { border-left-color: #48cae4; }
+
+  /* Priority table */
+  .priority-row-critical { background: rgba(230,57,70,0.15); }
+  .priority-row-high     { background: rgba(233,196,106,0.12); }
+
+  /* Sidebar */
+  .sidebar-section {
+    background: #0d1b2a;
+    border: 1px solid #1e3a5f;
+    border-radius: 6px;
+    padding: 12px;
+    margin-bottom: 12px;
+    font-size: 0.85rem;
+  }
+  .sidebar-section h4 {
+    color: #48cae4;
+    font-size: 0.8rem;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+
+  /* Buttons */
+  div.stButton > button {
+    background: linear-gradient(135deg, #0f3460, #1e6091);
+    color: #48cae4;
+    border: 1px solid #48cae4;
+    border-radius: 6px;
+    font-family: 'Rajdhani', sans-serif;
+    font-weight: 700;
+    font-size: 1rem;
+    letter-spacing: 1px;
+    padding: 8px 20px;
+    width: 100%;
+    transition: all 0.2s;
+  }
+  div.stButton > button:hover {
+    background: linear-gradient(135deg, #1e6091, #48cae4);
+    color: #070e1a;
+  }
+
+  /* Section headers */
+  .section-header {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.72rem;
+    letter-spacing: 2px;
+    color: #48cae4;
+    text-transform: uppercase;
+    border-bottom: 1px solid #1e3a5f;
+    padding-bottom: 4px;
+    margin-bottom: 10px;
+  }
+
+  /* Hide streamlit branding */
+  #MainMenu, footer, header { visibility: hidden; }
+  .block-container { padding-top: 0.5rem; }
+</style>
+""", unsafe_allow_html=True)
+
+# ── Imports (after page config) ───────────────────────────────────────────────
+from modules.agent_loop import FloodAgent
+from modules.visualization import (
+    build_flood_map,
+    build_depth_heatmap_chart,
+    build_exposure_gauge,
+    build_rainfall_chart,
+    build_gauge_chart,
+    export_flood_geojson,
+)
+
+# ── Session state initialisation ──────────────────────────────────────────────
+if "agent" not in st.session_state:
+    st.session_state.agent = None
+if "last_update" not in st.session_state:
+    st.session_state.last_update = None
+if "sim_running" not in st.session_state:
+    st.session_state.sim_running = False
+if "cycle_count" not in st.session_state:
+    st.session_state.cycle_count = 0
+
+
+# ── Header ────────────────────────────────────────────────────────────────────
+agent_badge = "● LIVE" if st.session_state.sim_running else "○ IDLE"
+st.markdown(f"""
+<div class="main-header">
+  <span style="font-size:2rem">🌊</span>
+  <h1>Autonomous Flood Inundation Mapping Agent</h1>
+  <span class="badge">{agent_badge}</span>
+  <span style="font-family:'IBM Plex Mono',monospace;font-size:0.75rem;
+               color:#8899bb;margin-left:auto">
+    {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}
+  </span>
+</div>
+""", unsafe_allow_html=True)
+
+
+# ── Sidebar ────────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown("## 🛰 Mission Control")
+
+    # Control buttons
+    col_a, col_b = st.columns(2)
+    with col_a:
+        run_btn = st.button("▶ Run Simulation", key="run_sim")
+    with col_b:
+        update_btn = st.button("⟳ Force Update", key="force_update")
+
+    if run_btn:
+        if not st.session_state.sim_running:
+            with st.spinner("Initialising agent…"):
+                agent = FloodAgent(interval_sec=45)
+                agent.start()
+                st.session_state.agent = agent
+                st.session_state.sim_running = True
+                st.session_state.last_update = datetime.utcnow()
+            st.success("Simulation started!")
+            st.rerun()
+
+    if update_btn and st.session_state.agent is not None:
+        with st.spinner("Running update cycle…"):
+            st.session_state.agent.force_update()
+            st.session_state.last_update = datetime.utcnow()
+        st.rerun()
+
+    # Auto-refresh toggle
+    auto_refresh = st.checkbox("Auto-refresh (every 45s)", value=False)
+
+    st.divider()
+
+    # Gauge levels (live)
+    agent: FloodAgent | None = st.session_state.agent
+    if agent and agent.state:
+        gauges = agent.state.get("gauge_levels", {})
+        st.markdown('<div class="sidebar-section"><h4>River Gauge Status</h4>', unsafe_allow_html=True)
+        for gid, g in gauges.items():
+            color = "#e63946" if g["status"] == "CRITICAL" else \
+                    "#e9c46a" if g["status"] == "WARNING"  else "#48cae4"
+            st.markdown(f"""
+            <div style="display:flex;justify-content:space-between;margin-bottom:6px">
+              <span style="font-size:0.8rem">{g['name']}</span>
+              <span style="font-family:monospace;color:{color};font-weight:600">
+                {g['level_m']:.2f} m <span style="font-size:0.7rem">{g['status']}</span>
+              </span>
+            </div>""", unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        # Key stats
+        stats  = agent.state.get("exposure_stats", {})
+        rain   = agent.state.get("rainfall_mm", 0)
+        cycles = agent.cycle_count
+
+        st.markdown(f"""
+        <div class="sidebar-section">
+          <h4>Current Snapshot</h4>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
+            <div><div class="metric-card">
+              <div class="value">{rain:.1f}</div>
+              <div class="label">mm/hr rain</div>
+            </div></div>
+            <div><div class="metric-card">
+              <div class="value">{stats.get('flooded_cells', 0)}</div>
+              <div class="label">flooded cells</div>
+            </div></div>
+            <div><div class="metric-card">
+              <div class="value" style="font-size:1.3rem">{stats.get('total_exposed', 0):,}</div>
+              <div class="label">people exposed</div>
+            </div></div>
+            <div><div class="metric-card">
+              <div class="value">{cycles}</div>
+              <div class="label">update cycles</div>
+            </div></div>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.divider()
+    st.markdown("""
+    <div style="font-size:0.72rem;color:#556;line-height:1.6">
+      <b>Data Sources</b><br>
+      • SAR Tiles: Simulated backscatter<br>
+      • DEM: Synthetic elevation model<br>
+      • Rainfall: OpenWeatherMap API / sim<br>
+      • Gauges: Mock hydrological feed<br>
+      • Population: Synthetic density grid<br><br>
+      <b>Model</b><br>
+      Heuristic inundation + ML logistic regression
+    </div>
+    """, unsafe_allow_html=True)
+
+
+# ── Main dashboard ────────────────────────────────────────────────────────────
+if st.session_state.agent is None or not st.session_state.agent.state:
+    # Splash screen
+    st.markdown("""
+    <div style="text-align:center;padding:80px 40px">
+      <div style="font-size:5rem;margin-bottom:20px">🌊</div>
+      <h2 style="font-family:'Rajdhani',sans-serif;color:#48cae4;letter-spacing:3px">
+        FLOOD INUNDATION MAPPING AGENT
+      </h2>
+      <p style="color:#8899bb;max-width:500px;margin:0 auto;line-height:1.8">
+        Press <b style="color:#48cae4">▶ Run Simulation</b> in the sidebar to initialise 
+        the agent and begin real-time flood inundation mapping, depth estimation, 
+        population exposure analysis and evacuation priority ranking.
+      </p>
+      <div style="margin-top:30px;display:flex;justify-content:center;gap:30px;flex-wrap:wrap">
+        <div style="background:#0d1b2a;border:1px solid #1e6091;border-radius:8px;
+                    padding:16px 24px;min-width:140px">
+          <div style="font-size:1.8rem">🛰</div>
+          <div style="color:#48cae4;font-size:0.85rem;margin-top:6px">SAR + DEM<br>Ingestion</div>
+        </div>
+        <div style="background:#0d1b2a;border:1px solid #1e6091;border-radius:8px;
+                    padding:16px 24px;min-width:140px">
+          <div style="font-size:1.8rem">🗺</div>
+          <div style="color:#48cae4;font-size:0.85rem;margin-top:6px">Inundation<br>Mapping</div>
+        </div>
+        <div style="background:#0d1b2a;border:1px solid #1e6091;border-radius:8px;
+                    padding:16px 24px;min-width:140px">
+          <div style="font-size:1.8rem">👥</div>
+          <div style="color:#48cae4;font-size:0.85rem;margin-top:6px">Exposure<br>Analysis</div>
+        </div>
+        <div style="background:#0d1b2a;border:1px solid #1e6091;border-radius:8px;
+                    padding:16px 24px;min-width:140px">
+          <div style="font-size:1.8rem">🚨</div>
+          <div style="color:#48cae4;font-size:0.85rem;margin-top:6px">Evacuation<br>Ranking</div>
+        </div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+    st.stop()
+
+# Grab latest state
+agent: FloodAgent = st.session_state.agent
+state = agent.state
+
+inundation_mask  = state["inundation_mask"]
+flood_depth      = state["flood_depth"]
+exposure_stats   = state["exposure_stats"]
+priority_zones   = state["priority_zones"]
+gauge_levels     = state["gauge_levels"]
+rainfall_ts      = state["rainfall_timeseries"]
+rainfall_mm      = state["rainfall_mm"]
+flood_prob       = state.get("flood_probability")
+ts               = state["timestamp"]
+
+# ── Row 1: Interactive Map ────────────────────────────────────────────────────
+st.markdown('<div class="section-header">🗺 Interactive Flood Inundation Map</div>',
+            unsafe_allow_html=True)
+
+with st.spinner("Rendering flood map…"):
+    flood_map = build_flood_map(inundation_mask, flood_depth, priority_zones, flood_prob)
+    map_html  = flood_map.repr_html()
+
+components.html(map_html, height=480, scrolling=False)
+
+st.caption(
+    f"Last updated: {ts} UTC  |  "
+    f"Flooded cells: {exposure_stats['flooded_cells']} / {exposure_stats['total_cells']}  |  "
+    f"Rainfall: {rainfall_mm} mm/hr"
+)
+
+# ── Row 2: Depth Heatmap | Exposure Gauge | Rainfall Chart ───────────────────
+st.markdown('<div class="section-header">📊 Analytics</div>', unsafe_allow_html=True)
+
+col1, col2, col3 = st.columns([2, 1.2, 1.8])
+
+with col1:
+    depth_fig = build_depth_heatmap_chart(flood_depth)
+    st.plotly_chart(depth_fig, use_container_width=True, config={"displayModeBar": False})
+
+with col2:
+    gauge_fig = build_exposure_gauge(exposure_stats)
+    st.plotly_chart(gauge_fig, use_container_width=True, config={"displayModeBar": False})
+
+    # Exposure breakdown
+    st.markdown(f"""
+    <div class="metric-card" style="margin-top:6px">
+      <div class="value" style="font-size:1.4rem">{exposure_stats['total_exposed']:,}</div>
+      <div class="label">people at risk</div>
+    </div>
+    <div class="metric-card">
+      <div class="value" style="font-size:1.4rem">{exposure_stats['max_density_flooded']:.0f}</div>
+      <div class="label">peak density (ppl/km²)</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+with col3:
+    rain_fig = build_rainfall_chart(rainfall_ts)
+    st.plotly_chart(rain_fig, use_container_width=True, config={"displayModeBar": False})
+
+# ── Row 3: Gauge Chart | Priority Zones ──────────────────────────────────────
+col4, col5 = st.columns([1, 2])
+
+with col4:
+    g_fig = build_gauge_chart(gauge_levels)
+    st.plotly_chart(g_fig, use_container_width=True, config={"displayModeBar": False})
+
+with col5:
+    st.markdown('<div class="section-header">🚨 Evacuation Priority Zones</div>',
+                unsafe_allow_html=True)
+    if priority_zones.empty:
+        st.info("No flood zones detected in this cycle.")
+    else:
+        display_df = priority_zones.head(15).copy()
+        display_df["alert_level"] = display_df["alert_level"].astype(str)
+
+        # Colour-code alert levels
+        def row_style(row):
+            if row["alert_level"] == "CRITICAL":
+                return ["background-color: rgba(230,57,70,0.2)"] * len(row)
+            elif row["alert_level"] == "HIGH":
+                return ["background-color: rgba(233,196,106,0.15)"] * len(row)
+            return [""] * len(row)
+
+        styled = display_df.style.apply(row_style, axis=1).format({
+            "mean_depth_m":     "{:.2f}",
+            "max_depth_m":      "{:.2f}",
+            "pop_density_avg":  "{:.0f}",
+            "accessibility":    "{:.2f}",
+            "flooded_fraction": "{:.1%}",
+            "priority_score":   "{:.4f}",
+        })
+        st.dataframe(styled, use_container_width=True, height=240,
+                     hide_index=True)
+
+# ── Row 4: Alert Feed ──────────────────────────────────────────────────────────
+st.markdown('<div class="section-header">📡 Live Alert Feed</div>',
+            unsafe_allow_html=True)
+
+alert_feed = agent.alert_feed
+if not alert_feed:
+    st.info("No alerts yet.")
+else:
+    alert_html = ""
+    for entry in alert_feed[:20]:
+        sev = entry["severity"]
+        css_class = (
+            "alert-critical" if "CRITICAL" in sev else
+            "alert-high"     if "HIGH"     in sev else
+            "alert-warning"  if "WARNING"  in sev else
+            "alert-normal"
+        )
+        ts_str = entry["timestamp"][:19].replace("T", " ")
+        alert_html += f"""
+        <div class="alert-item {css_class}">
+          <span style="color:#8899bb">[{ts_str}]</span>
+          <span style="color:#fff;font-weight:600;margin:0 8px">Cycle #{entry['cycle']}</span>
+          {sev}
+          <span style="color:#cdd6f4"> — {entry['message']}</span>
+        </div>"""
+    st.markdown(alert_html, unsafe_allow_html=True)
+
+# ── Download Row ───────────────────────────────────────────────────────────────
+st.divider()
+st.markdown('<div class="section-header">⬇ Export</div>', unsafe_allow_html=True)
+
+dl1, dl2, dl3 = st.columns(3)
+
+with dl1:
+    geojson_str = export_flood_geojson(inundation_mask, flood_depth)
+    st.download_button(
+        label="⬇ Download Flood Zones (GeoJSON)",
+        data=geojson_str,
+        file_name=f"flood_zones_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.geojson",
+        mime="application/geo+json",
+        use_container_width=True,
+    )
+
+with dl2:
+    if not priority_zones.empty:
+        csv_str = priority_zones.to_csv(index=False)
+        st.download_button(
+            label="⬇ Download Priority Zones (CSV)",
+            data=csv_str,
+            file_name=f"priority_zones_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+with dl3:
+    alert_json = json.dumps(agent.alert_feed, indent=2)
+    st.download_button(
+        label="⬇ Download Alert Log (JSON)",
+        data=alert_json,
+        file_name=f"alert_log_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json",
+        mime="application/json",
+        use_container_width=True,
+    )
+
+# ── Auto-refresh ───────────────────────────────────────────────────────────────
+if auto_refresh and st.session_state.sim_running:
+    time.sleep(45)
+    st.rerun()
